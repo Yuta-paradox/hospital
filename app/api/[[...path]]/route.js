@@ -223,8 +223,9 @@ on('POST','platform/hospitals',async req=>{
   await (await col('hospitals')).updateOne({_id:oid(id)},{$set:{status,verification:{checks:checks||{},verifier:str(verifier).slice(0,80),note:str(note).slice(0,300),at:new Date()}}});
   await audit('platform','set_'+status,{id,verifier:str(verifier)});return J({ok:true});
 });
-on('GET','platform/overview',async req=>{
-  platform(req);await sweep();
-  const[H,B,R,A]=await Promise.all([col('hospitals'),col('beds'),col('reservations'),col('audit')]),now=Date.now();
-  const hs=await H.find({status:'verified'}).toArray(),by=new Map(hs.map(h=>[String(h._id),h]));
-  const cap=(await B.aggregate([{$match:{hospital_id:{$in:hs.map(h=>h._id)}}},{$group:{_id:{h:'$hospital_id',t:'$bed_type'},total:{$sum:1},free:{$sum:{$cond:[{$eq:['$status','available']},1,0]}},held:{$sum:{$cond:[{$eq:['$status','reserved']},
+on('GET','reservations/:id',async(_,id)=>{await sweep();const r=await view(id);return r?J(r):J({error:'Not found'},404)});
+on('POST','reservations/:id',async(_,id)=>{
+  const r=await (await col('reservations')).findOneAndUpdate({_id:String(id),status:{$in:['held','confirmed']}},{$set:{status:'released',closed_at:new Date()}});
+  if(r)await (await col('beds')).updateOne({_id:r.bed_id,status:'reserved'},{$set:{status:'available',updated_at:new Date()}});
+  const v=await view(id);return v?J(v):J({error:'Not found'},404);
+});

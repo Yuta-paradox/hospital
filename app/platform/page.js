@@ -1,0 +1,21 @@
+'use client';
+import {useState} from 'react';import {api,ago} from '@/lib/client';
+const CK=[['reg_matches','Registration number and name match the official state register'],['callback_done','I phoned the published emergency number and a hospital officer confirmed'],['location_ok','Map location matches the hospital address'],['email_ok','Email domain belongs to the hospital (matches the official website)']];
+function Row({x,h,reload}){const[c,setC]=useState(x.verification?.checks||{}),[who,setWho]=useState(x.verification?.verifier||''),[note,setNote]=useState(''),[err,setErr]=useState('');
+ const all=CK.every(([k])=>c[k]),exp=new Date(x.licence_valid_till)<new Date();
+ const go=async status=>{setErr('');try{await api('/api/platform/hospitals',{h,b:{id:x.id,status,checks:c,verifier:who,note}});reload()}catch(e){setErr(e.message)}};
+ return<div className="card"><div className="row" style={{justifyContent:'space-between'}}><b>{x.name}</b><span className={'pill '+(x.status==='verified'?'ok':x.status==='rejected'?'crit':'')}>{x.status}</span></div>
+ <div className="m">Reg. no. <b>{x.reg_no}</b> · {x.type} · {x.address}, {x.city}, {x.state} {x.pincode}</div>
+ <div className="m">Emergency <a href={'tel:'+x.emergency_phone}>{x.emergency_phone}</a> · {x.contact_email} · {x.beds} beds · {x.facilities?.join(', ')||'no special facilities'}</div>
+ <div className="m">Website <a href={x.website} target="_blank" rel="noopener noreferrer">{x.website}</a> · Medical council no. <b>{x.mc_reg_no}</b> · Licence until <b className={exp?'err':''}>{new Date(x.licence_valid_till).toLocaleDateString()}</b>{exp&&' (EXPIRED)'}</div>
+ <div className="m">Location <a href={`https://www.openstreetmap.org/?mlat=${x.lat}&mlon=${x.lng}#map=17/${x.lat}/${x.lng}`} target="_blank" rel="noopener noreferrer">{x.lat}, {x.lng}</a> · Registered {ago(x.created_at)}</div>
+ <div className="row" style={{margin:'6px 0'}}><span className={'pill '+(x.auto?.email_domain_matches_website?'ok':'crit')}>{x.auto?.email_domain_matches_website?'email domain matches website':'email domain does NOT match website'}</span>{x.auto?.near_duplicate&&<span className="pill crit">within 100 m of {x.auto.near_duplicate}</span>}</div>
+ <div className="chk" style={{flexDirection:'column',alignItems:'flex-start'}}>{CK.map(([k,t])=><label key={k}><input type="checkbox" checked={!!c[k]} onChange={e=>setC({...c,[k]:e.target.checked})}/>{t}</label>)}</div>
+ <div className="grid"><div><label>Verifier name</label><input value={who} onChange={e=>setWho(e.target.value)}/></div><div><label>Note (required to reject)</label><input value={note} onChange={e=>setNote(e.target.value)} placeholder="e.g. registration not found in state register"/></div></div>
+ {x.verification?.at&&<div className="m">Last decision by {x.verification.verifier||'—'} {ago(x.verification.at)}{x.verification.note?': '+x.verification.note:''}</div>}
+ <div className="row" style={{marginTop:8}}><button className="g" disabled={!all||who.trim().length<2||exp} onClick={()=>go('verified')}>Verify</button><button className="r" onClick={()=>go('rejected')}>Reject</button>{x.status!=='pending'&&<button className="o" onClick={()=>go('pending')}>Back to pending</button>}<span className="err">{err}</span></div></div>}
+export default function Platform(){const[k,setK]=useState(''),[list,setList]=useState(null),[err,setErr]=useState('');
+ const h={'x-platform-key':k},load=async()=>{try{setList(await fetch('/api/platform/hospitals',{headers:h,cache:'no-store'}).then(async r=>{const d=await r.json();if(!r.ok)throw new Error(d.error);return d}));setErr('')}catch(e){setErr(e.message)}};
+ return<main className="wrap"><h1>Platform verification</h1><p className="m" style={{margin:0}}>A hospital goes live only after every check below is ticked: check the registration number in the official register, phone the published emergency number, confirm the location and the email domain. Only verified hospitals appear to patients.</p>
+ <div className="card row"><input type="password" placeholder="Platform key" value={k} onChange={e=>setK(e.target.value)} style={{maxWidth:280}}/><button onClick={load}>Load hospitals</button><span className="err">{err}</span></div>
+ {list&&!list.length&&<div className="card m">No hospital has registered yet.</div>}{list?.map(x=><Row key={x.id+x.status} x={x} h={h} reload={load}/>)}</main>}

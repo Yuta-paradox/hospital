@@ -1,0 +1,4 @@
+{"name":"bed-agent","version":"2.0.0","private":true,
+"scripts":{"dev":"next dev","build":"next build","start":"next start","db:seed":"node --env-file=.env.local scripts/seed-demo.mjs"},
+"dependencies":{"bcryptjs":"^2.4.3","jose":"^5.9.6","leaflet":"^1.9.4","mongodb":"^6.9.0","next":"^14.2.25","react":"18.3.1","react-dom":"18.3.1"},
+"engines":{"node":">=20"}}

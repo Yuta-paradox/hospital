@@ -223,9 +223,69 @@ on('POST','platform/hospitals',async req=>{
   await (await col('hospitals')).updateOne({_id:oid(id)},{$set:{status,verification:{checks:checks||{},verifier:str(verifier).slice(0,80),note:str(note).slice(0,300),at:new Date()}}});
   await audit('platform','set_'+status,{id,verifier:str(verifier)});return J({ok:true});
 });
+on('GET','platform/overview',async req=>{
+  platform(req);await sweep();
+  const[H,B,R,A]=await Promise.all([col('hospitals'),col('beds'),col('reservations'),col('audit')]),now=Date.now();
+  const hs=await H.find({status:'verified'}).toArray(),by=new Map(hs.map(h=>[String(h._id),h]));
+  const cap=(await B.aggregate([{$match:{hospital_id:{$in:hs.map(h=>h._id)}}},{$group:{_id:{h:'$hospital_id',t:'$bed_type'},total:{$sum:1},free:{$sum:{$cond:[{$eq:['$status','available']},1,0]}},held:{$sum:{$cond:[{$eq:['$status','reserved']},1,0]}},updated:{$max:'$updated_at'}}}]).toArray())
+    .map(x=>{const h=by.get(String(x._id.h));return{id:String(x._id.h),name:h.name,city:h.city,bed_type:x._id.t,total:x.total,free:x.free,held:x.held,updated:x.updated}}).sort((a,b)=>a.name.localeCompare(b.name));
+  const active=(await R.find({status:{$in:['held','confirmed']}}).sort({created_at:-1}).limit(50).toArray())
+    .map(r=>({id:r._id,status:r.status,urgency:r.urgency,created_at:r.created_at,expires_at:r.expires_at,bed_type:r.bed_type,hospital:r.hospital_name,unanswered:r.urgency==='critical'&&r.status==='held'&&now-new Date(r.created_at)>ESCALATE_S*1000}));
+  const audits=await A.find().sort({ts:-1}).limit(40).toArray();
+  const st=await R.aggregate([{$match:{created_at:{$gt:new Date(now-864e5)}}},{$group:{_id:'$status',n:{$sum:1}}}]).toArray(),g=k=>st.find(x=>x._id===k)?.n||0;
+  const cnt=new Map((await B.aggregate([{$match:{hospital_id:{$in:hs.map(h=>h._id)}}},{$group:{_id:'$hospital_id',n:{$sum:1}}}]).toArray()).map(x=>[String(x._id),x.n])),mask=n=>String(n||'').split(/\s+/).filter(Boolean).map(w=>w[0].toUpperCase()+'.').join(' ');
+  const hospitals=hs.map(h=>({id:String(h._id),name:h.name,city:h.city,emergency_phone:h.emergency_phone,last_confirmed_at:h.last_confirmed_at,beds:cnt.get(String(h._id))||0})).sort((a,b)=>a.name.localeCompare(b.name));
+  const recent=(await R.find().sort({created_at:-1}).limit(30).toArray()).map(r=>({id:r._id,created_at:r.created_at,urgency:r.urgency,status:r.status,hospital:r.hospital_name,bed_type:r.bed_type,reason:r.decline_reason,patient:mask(r.patient),phone:'••••'+String(r.phone_digits||'').slice(-4)}));
+  return J({cap,active,hospitals,recent,audit:audits.map(a=>({ts:a.ts,actor:a.actor,action:a.action})),stats:{arrived:g('arrived'),expired:g('expired'),declined:g('declined'),released:g('released')}});
+});
+
+// ---------- patient: search ----------
+const bedFilter=(n,base)=>{const f={...base};if(n.includes('ventilator'))f.has_ventilator=true;if(n.includes('oxygen'))f.has_oxygen=true;if(n.includes('isolation'))f.isolation=true;return f};
+on('POST','search',async req=>{
+  if(await limited(req,'search',60,60))return tooMany();
+  const{lat,lng,bed_type,urgency='critical',needs=[],exclude=[]}=await req.json();
+  if(typeof lat!=='number'||typeof lng!=='number'||!BED_TYPES.includes(bed_type))return J({error:'location and bed type required'},400);
+  await sweep();
+  const skip=(Array.isArray(exclude)?exclude:[]).map(oid).filter(Boolean),[B,H]=await Promise.all([col('beds'),col('hospitals')]);
+  const g=await B.aggregate([{$match:bedFilter(needs,{bed_type,status:'available',hospital_id:{$nin:skip}})},{$group:{_id:'$hospital_id',free:{$sum:1},bu:{$max:'$updated_at'}}}]).toArray();
+  if(!g.length)return J({ranked:[]});
+  const free=new Map(g.map(x=>[String(x._id),x])),hs=await H.find({_id:{$in:g.map(x=>x._id)},status:'verified'}).toArray();
+  const rows=hs.filter(h=>!h.licence_valid_till||new Date(h.licence_valid_till)>=new Date()).map(h=>{const x=free.get(String(h._id));return{id:String(h._id),name:h.name,address:h.address,city:h.city,lat:h.lat,lng:h.lng,emergency_phone:h.emergency_phone,facilities:h.facilities||[],emergency_level:h.emergency_level,free:x.free,updated_at:new Date(Math.max(+x.bu,+h.last_confirmed_at)),last_confirmed_at:h.last_confirmed_at}});
+  if(!rows.length)return J({ranked:[]});
+  const ranked=await rank({lat,lng},rows,urgency,needs.filter(n=>FACILITIES.includes(n)));
+  return J({ranked:ranked.slice(0,5).map(({f,...r})=>r)});
+});
+
+// ---------- patient: reserve / track / cancel ----------
+const view=async id=>{
+  const R=await col('reservations'),r=await R.findOne({_id:String(id)});if(!r)return null;
+  const[b,h]=await Promise.all([(await col('beds')).findOne({_id:r.bed_id}),(await col('hospitals')).findOne({_id:r.hospital_id})]);
+  return{id:r._id,status:r.status,decline_reason:r.decline_reason,expires_at:r.expires_at,urgency:r.urgency,bed_type:r.bed_type,label:b?.label,ward:b?.ward,floor:b?.floor,hospital:h?.name,address:h?.address,emergency_phone:h?.emergency_phone,lat:h?.lat,lng:h?.lng};
+};
+on('POST','reservations',async req=>{
+  if(await limited(req,'reserve',6,600))return tooMany();
+  const b=await req.json();
+  if(str(b.patient).length<2||!/^[+\d][\d\s-]{8,14}$/.test(b.phone||''))return J({error:'Patient name and a valid contact phone are required'},400);
+  const hid=oid(b.hospital_id);if(!BED_TYPES.includes(b.bed_type)||!hid)return J({error:'Invalid request'},400);
+  await sweep();
+  const[H,B,R]=await Promise.all([col('hospitals'),col('beds'),col('reservations')]),digits=b.phone.replace(/\D/g,'');
+  if(await R.countDocuments({phone_digits:digits,status:{$in:['held','confirmed']}})>=2)return J({error:'This phone number already has active reservations. Cancel one first.'},429);
+  const h=await H.findOne({_id:hid,status:'verified'});
+  if(!h||(h.licence_valid_till&&new Date(h.licence_valid_till)<new Date()))return J({error:'That hospital is no longer available. Showing the next best hospitals.',taken:true},409);
+  // Atomic claim: Mongo updates one document at a time, so two patients can never get the same bed.
+  const now=new Date(),bed=await B.findOneAndUpdate(bedFilter(b.needs||[],{hospital_id:hid,bed_type:b.bed_type,status:'available'}),{$set:{status:'reserved',updated_at:now}},{sort:{_id:1},returnDocument:'after'});
+  if(!bed)return J({error:'That bed was just taken by another patient. Showing the next best hospitals.',taken:true},409);
+  const urg=b.urgency==='stable'?'stable':'critical',id=randomUUID(),exp=new Date(+now+WINDOW[urg]*6e4);
+  try{await R.insertOne({_id:id,bed_id:bed._id,hospital_id:hid,hospital_name:h.name,bed_type:bed.bed_type,label:bed.label,patient:str(b.patient).slice(0,100),phone:b.phone,phone_digits:digits,urgency:urg,condition:String(b.condition||'').slice(0,300),status:'held',decline_reason:null,expires_at:exp,created_at:now})}
+  catch(e){await B.updateOne({_id:bed._id},{$set:{status:'available',updated_at:new Date()}});throw e}   // never leave a bed stuck as reserved
+  await audit('patient','reserve',{id,urgency:urg});return J({id,expires_at:exp},201);
+});
 on('GET','reservations/:id',async(_,id)=>{await sweep();const r=await view(id);return r?J(r):J({error:'Not found'},404)});
 on('POST','reservations/:id',async(_,id)=>{
   const r=await (await col('reservations')).findOneAndUpdate({_id:String(id),status:{$in:['held','confirmed']}},{$set:{status:'released',closed_at:new Date()}});
   if(r)await (await col('beds')).updateOne({_id:r.bed_id,status:'reserved'},{$set:{status:'available',updated_at:new Date()}});
   const v=await view(id);return v?J(v):J({error:'Not found'},404);
 });
+
+   
+    

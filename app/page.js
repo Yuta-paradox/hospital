@@ -1,0 +1,6 @@
+import Link from 'next/link';import {whoBeds} from '@/lib/who';export const revalidate=86400;
+const C=[['/patient','🚑','Patient or family','Find the nearest hospital with a free bed and reserve it.','ok'],['/admin','🏥','Hospital staff','Update beds and respond to incoming patients.','info'],['/dispatch','📡','Control room','Watch city-wide capacity and active referrals.','wa'],['/platform','🛡️','Verifier','Check hospital registrations before they go live.','mute']];
+export default async function Home(){const who=await whoBeds();return<main className="wrap"><div className="sos"><b>In immediate danger? Call first, then search for a bed.</b><span className="row"><a href="tel:108">Ambulance 108</a><a href="tel:112">Emergency 112</a></span></div>
+<div className="hero"><h1>Find a free emergency bed, fast.</h1><p className="m" style={{fontSize:17,maxWidth:560}}>Hospitals report their beds live. Patients see who can take them, reserve a bed, and get redirected at once if a hospital cannot accept.</p></div>
+<div className="grid">{C.map(([h,i,t,d,k])=><Link key={h} href={h} className="card role"><div className={'ico '+k}>{i}</div><b style={{fontSize:18}}>{t}</b><span className="m">{d}</span></Link>)}</div>
+{who&&<p className="m">WHO context ({who.year}): {who.name} = {who.value}. National statistic, not live capacity.</p>}</main>}
